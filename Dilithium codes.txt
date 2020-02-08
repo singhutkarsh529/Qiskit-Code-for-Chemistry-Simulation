@@ -1,0 +1,108 @@
+from qiskit import IBMQ
+IBMQ.save_account('*********use_your_api_token_here*************', 'https://api.quantum-computing.ibm.com/api/Hubs/ibm-q/Groups/open/Projects/main')
+overwrite = True
+
+import numpy as np
+from qiskit import Aer
+from qiskit.aqua import Operator, QuantumInstance
+from qiskit.aqua.algorithms import VQE
+from qiskit.aqua.components.optimizers import COBYLA
+from qiskit.chemistry import FermionicOperator
+from qiskit.chemistry.drivers import PyQuanteDriver, UnitsType, BasisType, BaseDriver
+from qiskit.aqua.components.variational_forms import RYRZ, SwapRZ
+from qiskit.chemistry.aqua_extensions.components.initial_states import HartreeFock
+from qiskit.chemistry.aqua_extensions.components.variational_forms import UCCSD
+
+
+# using PyQuante driver to get fermionic Hamiltonian for Li2+ 
+# PyQuante2 Package needed
+driver = PyQuanteDriver(atoms='Li .0 .0 1.5497; Li .0 .0 -1.5497', 
+                        units=UnitsType.ANGSTROM,
+                        charge=1, 
+                        multiplicity=2,
+                        basis=BasisType.BSTO3G)
+hf_method = 'rohf'
+mol_cat = driver.run()
+
+
+#for 16 qubits
+#freeze_list = [0]
+#remove_list = [-6] 
+
+#for 14 qubits
+#freeze_list = [0]
+#remove_list = [-6, -5] 
+
+#for 12 qubits 
+freeze_list = [0]
+remove_list = [-6, -5, -4] 
+# negative number denotes the reverse order of electrons
+
+
+remove_list = [x % mol_cat.num_orbitals for x in remove_list]
+freeze_list = [x % mol_cat.num_orbitals for x in freeze_list]
+remove_list = [x - len(freeze_list) for x in remove_list]
+remove_list += [x + mol_cat.num_orbitals - len(freeze_list)  for x in remove_list]
+freeze_list += [x + mol_cat.num_orbitals for x in freeze_list]
+print(mol_cat.num_orbitals)
+print(remove_list)
+print(freeze_list)
+
+
+map_type = 'jordan_wigner' #can also use 'parity' and 'Bravyi-kitaev' method
+Li1 = mol_cat.one_body_integrals
+Li2 = mol_cat.two_body_integrals
+nuclear_repulsion_energy = mol_cat.nuclear_repulsion_energy
+num_particles = mol_cat.num_alpha + mol_cat.num_beta
+num_spin_orbitals = mol_cat.num_orbitals * 2
+
+
+energy_shift = 0.0
+qubit_reduction = True if map_type == 'parity' else False
+ferOp = FermionicOperator(h1=Li1, h2=Li2)
+if len(freeze_list) > 0:
+    ferOp, energy_shift = ferOp.fermion_mode_freezing(freeze_list)
+    num_spin_orbitals -= len(freeze_list)
+    num_particles -= len(freeze_list)
+if len(remove_list) > 0:
+    ferOp = ferOp.fermion_mode_elimination(remove_list)
+    num_spin_orbitals -= len(remove_list)
+
+qubitOp = ferOp.mapping(map_type=map_type)
+qubitOp = qubitOp.two_qubit_reduced_operator(num_particles) if qubit_reduction else qubitOp
+qubitOp.chop(10**-10)
+
+
+backend = Aer.get_backend('statevector_simulator')
+#backend=Aer.get_backend('qasm_simulator')
+#backend = IBMQ.get_backend('ibmq_16_melbourne')
+
+
+cobyla = COBYLA(maxiter=400)
+# setup HartreeFock state
+HF_state = HartreeFock(qubitOp.num_qubits, num_spin_orbitals, num_particles, map_type)
+
+#UCCSD variational form
+var_form = UCCSD(qubitOp.num_qubits, depth=3,num_orbitals =num_spin_orbitals,num_particles = 4,
+               initial_state=HF_state, two_qubit_reduction=False, num_time_slices=1)
+
+                 
+#SwapRZ variational form
+                 
+#var_form = SwapRZ(qubitOp.num_qubits, depth=3, entangler_map=None,
+#                 entanglement='full', initial_state=None, skip_unentangled_qubits=False)
+
+
+#RYRZ variational form
+#var_form = RYRZ(qubitOp.num_qubits, depth=3, initial_state=HF_state)
+
+                   
+#VQE
+vqe = VQE(qubitOp, var_form, cobyla)
+quantum_instance = QuantumInstance(backend=backend)
+
+
+results = vqe.run(quantum_instance)
+print('The computed ground state energy is: {:.12f}'.format(results['eigvals'][0]))
+print('The total ground state energy is: {:.12f}'.format(results['eigvals'][0] + energy_shift + nuclear_repulsion_energy))
+print("Parameters: {}".format(results['opt_params']))
